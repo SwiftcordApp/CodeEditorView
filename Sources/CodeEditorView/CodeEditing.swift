@@ -152,8 +152,35 @@ extension CodeView {
 #elseif os(iOS) || os(visionOS)
 
   override var keyCommands: [UIKeyCommand] {
-    [ UIKeyCommand(input: "\t", modifierFlags: [], action: #selector(insertTab))
+    [ UIKeyCommand(input: "\t", modifierFlags: [], action: #selector(insertTab)),
+      UIKeyCommand(input: "\r", modifierFlags: [], action: #selector(insertReturn))
     ]
+  }
+
+  override public func insertText(_ text: String) {
+    guard markedTextRange == nil else {
+      super.insertText(text)
+      return
+    }
+
+    if text == "\n" || text == "\r" {
+      insertReturn()
+      return
+    }
+
+    if consumeClosingBracket(text) { return }
+
+    if text == "}", insertClosingCurlyBracket() { return }
+
+    registerUndoSnapshot()
+    super.insertText(text)
+  }
+
+  override public func deleteBackward() {
+    if deleteIndentationLevelBeforeInsertionPoint() { return }
+
+    registerUndoSnapshot()
+    super.deleteBackward()
   }
 
 #endif
@@ -214,7 +241,25 @@ extension NSRange {
       }
     }
   }
+
+  /// Clamp `self` to a valid range in a string of the given UTF-16 length.
+  ///
+  func clamped(toUTF16Length length: Int) -> NSRange {
+    let clampedLocation   = Swift.min(Swift.max(location, 0), length)
+    let clampedUpperBound = Swift.min(Swift.max(NSMaxRange(self), clampedLocation), length)
+
+    return NSRange(location: clampedLocation, length: clampedUpperBound - clampedLocation)
+  }
 }
+
+#if os(iOS) || os(visionOS)
+
+private struct CodeViewUndoSnapshot {
+  let text: String
+  let selectedRange: NSRange
+}
+
+#endif
 
 
 // MARK: -
@@ -278,6 +323,10 @@ extension CodeView {
           let codeStorage         = optCodeStorage,
           let codeStorageDelegate = codeStorage.delegate as? CodeStorageDelegate
     else { return }
+
+#if os(iOS) || os(visionOS)
+    registerUndoSnapshot()
+#endif
 
     func shift(line: Int, adjusting range: NSRange) -> NSRange {
       guard let theLine = codeStorageDelegate.lineMap.lookup(line: line)
@@ -366,6 +415,10 @@ extension CodeView {
           let codeStorage         = optCodeStorage,
           let codeStorageDelegate = codeStorage.delegate as? CodeStorageDelegate
     else { return }
+
+#if os(iOS) || os(visionOS)
+    registerUndoSnapshot()
+#endif
 
     // Determine whether the leading token on the given line is a single line comment token.
     func isCommented(line: Int) -> Bool {
@@ -507,6 +560,10 @@ extension CodeView {
           let codeStorageDelegate = codeStorage.delegate as? CodeStorageDelegate
     else { return }
 
+#if os(iOS) || os(visionOS)
+    registerUndoSnapshot()
+#endif
+
     /// Duplicate the given range right after the end of the original range and eturn the range of the duplicate.
     ///
     func duplicate(range: NSRange) -> NSRange {
@@ -538,6 +595,10 @@ extension CodeView {
   ///
   func reindent() {
     guard let textContentStorage = optTextContentStorage else { return }
+
+#if os(iOS) || os(visionOS)
+    registerUndoSnapshot()
+#endif
 
     textContentStorage.performEditingTransaction {
       processSelectedRanges { reindent(range: $0) }
@@ -644,6 +705,10 @@ extension CodeView {
           let codeStorage         = optCodeStorage,
           let codeStorageDelegate = codeStorage.delegate as? CodeStorageDelegate
     else { return }
+
+#if os(iOS) || os(visionOS)
+    registerUndoSnapshot()
+#endif
     
     // Determine the column index of the first character that is neither a space nor a tab character. It can be a
     // newline or the end of the line.
@@ -703,12 +768,16 @@ extension CodeView {
     }
   }
 
-  func insertReturn () {
+  @objc func insertReturn() {
 
     guard let textContentStorage  = optTextContentStorage,
           let codeStorage         = optCodeStorage,
           let codeStorageDelegate = codeStorage.delegate as? CodeStorageDelegate
     else { return }
+
+#if os(iOS) || os(visionOS)
+    registerUndoSnapshot()
+#endif
 
     func predictedIndentation(after index: Int) -> Int {
       guard let line     = codeStorageDelegate.lineMap.lineOf(index: index),
@@ -740,17 +809,182 @@ extension CodeView {
       }
     }
 
+    func openingCurlyBracketImmediatelyBefore(index: Int) -> Bool {
+      guard index > 0,
+            let token = codeStorage.tokenOnly(at: index - 1)
+      else { return false }
+
+      return token.token == .curlyBracketOpen && token.range.max == index
+    }
+
+    func nextNonWhitespaceClosingCurlyBracket(after index: Int) -> NSRange? {
+      let utf16View = codeStorage.string.utf16
+      var utf16Index = utf16View.index(utf16View.startIndex, offsetBy: index)
+      var location = index
+
+      while utf16Index < utf16View.endIndex {
+        let character = utf16View[utf16Index]
+
+        if let scalar = Unicode.Scalar(character),
+           CharacterSet.whitespacesAndNewlines.contains(scalar)
+        {
+          utf16Index = utf16View.index(after: utf16Index)
+          location += 1
+          continue
+        }
+
+        guard character == 125,
+              codeStorage.tokenOnly(at: location)?.token == .curlyBracketClose
+        else { return nil }
+
+        return NSRange(location: location, length: 1)
+      }
+
+      return nil
+    }
+
     textContentStorage.performEditingTransaction {
       processSelectedRanges { range in
 
-        let desiredIndent = if indentation.indentOnReturn { predictedIndentation(after: range.location) } else { 0 },
-            indentString  = indentation.indentation(for: desiredIndent)
-        codeStorage.replaceCharacters(in: range, with: "\n" + indentString)
-        return NSRange(location: range.location + 1 + indentString.count, length: 0)
+        let desiredIndent = if indentation.indentOnReturn { predictedIndentation(after: range.location) } else { 0 }
+
+        if range.length == 0, indentation.indentOnReturn, openingCurlyBracketImmediatelyBefore(index: range.location) {
+
+          let indentString        = indentation.indentation(for: desiredIndent),
+              closingIndent       = indentation.indentation(for: max(desiredIndent - indentation.indentWidth, 0)),
+              existingCloseRange  = nextNonWhitespaceClosingCurlyBracket(after: range.location),
+              replacementRange    = existingCloseRange.map {
+                NSRange(location: range.location, length: $0.location - range.location)
+              } ?? range,
+              replacement         = "\n" + indentString + "\n" + closingIndent + (existingCloseRange == nil ? "}" : ""),
+              insertionPointDelta = 1 + indentString.utf16.count
+
+          codeStorage.replaceCharacters(in: replacementRange, with: replacement)
+          return NSRange(location: range.location + insertionPointDelta, length: 0)
+
+        } else {
+
+          let indentString = indentation.indentation(for: desiredIndent)
+          codeStorage.replaceCharacters(in: range, with: "\n" + indentString)
+          return NSRange(location: range.location + 1 + indentString.count, length: 0)
+
+        }
 
       }
     }
   }
+
+#if os(iOS) || os(visionOS)
+
+  /// Insert a closing curly bracket and, if it appears after leading whitespace, outdent before insertion.
+  ///
+  func insertClosingCurlyBracket() -> Bool {
+
+    guard selectedRange.length == 0,
+          markedTextRange == nil,
+          let textContentStorage  = optTextContentStorage,
+          let codeStorage         = optCodeStorage,
+          let codeStorageDelegate = codeStorage.delegate as? CodeStorageDelegate,
+          let line                = codeStorageDelegate.lineMap.lineOf(index: selectedRange.location),
+          let lineInfo            = codeStorageDelegate.lineMap.lookup(line: line)
+    else { return false }
+
+    let prefixRange = NSRange(location: lineInfo.range.location, length: selectedRange.location - lineInfo.range.location)
+    guard prefixRange.length > 0,
+          let stringRange = Range<String.Index>(prefixRange, in: codeStorage.string)
+    else { return false }
+
+    let prefix = codeStorage.string[stringRange]
+    guard prefix.allSatisfy({ $0 == " " || $0 == "\t" }) else { return false }
+
+    registerUndoSnapshot()
+
+    textContentStorage.performEditingTransaction {
+
+      let desiredIndent    = max((lineInfo.info?.curlyBracketDepthStart ?? 0) - 1, 0) * indentation.indentWidth,
+          indentString     = indentation.indentation(for: desiredIndent),
+          replacementRange = NSRange(location: lineInfo.range.location, length: prefixRange.length)
+
+      codeStorage.replaceCharacters(in: replacementRange, with: indentString + "}")
+      selectedRange = NSRange(location: lineInfo.range.location + indentString.utf16.count + 1, length: 0)
+    }
+    return true
+  }
+
+  /// Advance over an existing closing bracket if the user types that same bracket at the insertion point.
+  ///
+  func consumeClosingBracket(_ text: String) -> Bool {
+
+    guard selectedRange.length == 0,
+          text.utf16.count == 1,
+          let expectedToken = closingBracketToken(for: text),
+          let codeStorage   = optCodeStorage,
+          selectedRange.location < codeStorage.length,
+          codeStorage.tokenOnly(at: selectedRange.location)?.token == expectedToken,
+          let textRange = Range<String.Index>(
+            NSRange(location: selectedRange.location, length: text.utf16.count),
+            in: codeStorage.string
+          ),
+          String(codeStorage.string[textRange]) == text
+    else { return false }
+
+    selectedRange = NSRange(location: selectedRange.location + text.utf16.count, length: 0)
+    return true
+  }
+
+  private func closingBracketToken(for text: String) -> LanguageConfiguration.Token? {
+    switch text {
+    case ")": return .roundBracketClose
+    case "]": return .squareBracketClose
+    case "}": return .curlyBracketClose
+    default:  return nil
+    }
+  }
+
+  /// Delete a whole indentation level when the insertion point is in leading spaces at an indentation boundary.
+  ///
+  func deleteIndentationLevelBeforeInsertionPoint() -> Bool {
+
+    guard selectedRange.length == 0,
+          selectedRange.location > 0,
+          indentation.indentWidth > 1,
+          let textContentStorage  = optTextContentStorage,
+          let codeStorage         = optCodeStorage,
+          let codeStorageDelegate = codeStorage.delegate as? CodeStorageDelegate,
+          let line                = codeStorageDelegate.lineMap.lineOf(index: selectedRange.location),
+          let lineInfo            = codeStorageDelegate.lineMap.lookup(line: line)
+    else { return false }
+
+    let column = selectedRange.location - lineInfo.range.location
+    guard column >= indentation.indentWidth,
+          column % indentation.indentWidth == 0
+    else { return false }
+
+    let prefixRange = NSRange(location: lineInfo.range.location, length: column)
+    guard let prefixStringRange = Range<String.Index>(prefixRange, in: codeStorage.string) else { return false }
+
+    let prefix = codeStorage.string[prefixStringRange]
+    guard prefix.allSatisfy({ $0 == " " }),
+          let deletionStringRange = Range<String.Index>(
+            NSRange(location: selectedRange.location - indentation.indentWidth, length: indentation.indentWidth),
+            in: codeStorage.string
+          ),
+          codeStorage.string[deletionStringRange].allSatisfy({ $0 == " " })
+    else { return false }
+
+    let deletionRange = NSRange(location: selectedRange.location - indentation.indentWidth,
+                                length: indentation.indentWidth)
+
+    registerUndoSnapshot()
+
+    textContentStorage.performEditingTransaction {
+      codeStorage.deleteCharacters(in: deletionRange)
+      selectedRange = NSRange(location: deletionRange.location, length: 0)
+    }
+    return true
+  }
+
+#endif
 
   /// Execute a block for each selected range, from back to front.
   ///
@@ -780,3 +1014,42 @@ extension CodeView {
 #endif
   }
 }
+
+#if os(iOS) || os(visionOS)
+
+extension CodeView {
+
+  func registerUndoSnapshot() {
+    guard !isApplyingUndoSnapshot,
+          let undoManager,
+          !undoManager.isUndoing,
+          !undoManager.isRedoing
+    else { return }
+
+    registerUndoSnapshot(CodeViewUndoSnapshot(text: text ?? "", selectedRange: selectedRange))
+  }
+
+  private func registerUndoSnapshot(_ snapshot: CodeViewUndoSnapshot) {
+    undoManager?.registerUndo(withTarget: self) { codeView in
+      codeView.apply(snapshot: snapshot)
+    }
+    undoManager?.setActionName("Typing")
+  }
+
+  private func apply(snapshot: CodeViewUndoSnapshot) {
+    let redoSnapshot = CodeViewUndoSnapshot(text: text ?? "", selectedRange: selectedRange)
+    registerUndoSnapshot(redoSnapshot)
+
+    let fullRange = NSRange(location: 0, length: ((text ?? "") as NSString).length)
+
+    isApplyingUndoSnapshot = true
+    textStorage.replaceCharacters(in: fullRange, with: snapshot.text)
+    selectedRange = snapshot.selectedRange.clamped(toUTF16Length: (snapshot.text as NSString).length)
+    isApplyingUndoSnapshot = false
+
+    delegate?.textViewDidChange?(self)
+    NotificationCenter.default.post(name: UITextView.textDidChangeNotification, object: self)
+  }
+}
+
+#endif

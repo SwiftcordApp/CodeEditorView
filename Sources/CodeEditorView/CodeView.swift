@@ -71,6 +71,7 @@ final class CodeView: UITextView {
   var minimapGutterView:        GutterView?
   var documentVisibleBox:       UIView?
   var minimapDividerView:       UIView?
+  var findIndicatorView:        UIView?
 
   // Notification observer
   private var textDidChangeObserver: NSObjectProtocol?
@@ -79,6 +80,10 @@ final class CodeView: UITextView {
   /// selection was an insertion point at all; i.e., it's length was 0).
   ///
   var oldLastLineOfInsertionPoint: Int? = 1
+
+  /// Whether we are currently applying a programmatic undo/redo text snapshot.
+  ///
+  var isApplyingUndoSnapshot = false
 
   /// The current highlighting theme
   ///
@@ -1548,6 +1553,13 @@ final class CodeContainer: NSTextContainer {
 /// Common code view actions triggered on a selection change.
 ///
 func selectionDidChange<TV: TextView>(_ textView: TV) {
+#if os(iOS) || os(visionOS)
+  if let codeView = textView as? CodeView {
+    codeView.findIndicatorView?.removeFromSuperview()
+    codeView.findIndicatorView = nil
+  }
+#endif
+
   guard let codeStorage  = textView.optCodeStorage,
         let visibleLines = textView.documentVisibleLines
   else { return }

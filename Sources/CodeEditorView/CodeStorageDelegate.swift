@@ -842,7 +842,28 @@ extension CodeStorageDelegate {
       if let matchingPreviousLexeme = matchingLexemeForOpeningBracket(previousToken.token)
       {
 
-        if let currentToken = currentTypedToken {
+        if previousToken.token == .curlyBracketOpen {
+
+          if currentTypedToken?.token == previousToken.token.matchingBracket {
+
+            // The current token is a matching closing bracket for the opening curly bracket => nothing to do
+            completingString = nil
+
+          } else if currentTypedToken == nil,
+                    let unichar = Unicode.Scalar(char),
+                    CharacterSet.newlines.contains(unichar)
+          {
+
+            // Opening curly brackets complete only on newline insertion.
+            completingString = String(unichar) + matchingPreviousLexeme
+
+          } else {
+
+            completingString = nil
+
+          }
+
+        } else if let currentToken = currentTypedToken {
 
           if currentToken.token == previousToken.token.matchingBracket {
 
@@ -864,8 +885,8 @@ extension CodeStorageDelegate {
 
         } else {
 
-          // If a opening curly brace or nested comment bracket is followed by a line break, add another line break
-          // before the matching closing bracket.
+          // If a nested comment bracket is followed by a line break, add another line break before the matching
+          // closing bracket.
           if let unichar = Unicode.Scalar(char),
              CharacterSet.newlines.contains(unichar),
              previousToken.token == .curlyBracketOpen || previousToken.token == .nestedCommentOpen

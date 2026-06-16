@@ -331,6 +331,12 @@ extension CodeEditor {
                                                           tabKey: .identsInWhitespace,
                                                           indentOnReturn: true)
 
+    public static let javaScript = IndentationConfiguration(preference: .preferSpaces,
+                                                            tabWidth: 4,
+                                                            indentWidth: 4,
+                                                            tabKey: .identsInWhitespace,
+                                                            indentOnReturn: true)
+
     // MARK: For 'RawRepresentable'
 
     public var rawValue: String {

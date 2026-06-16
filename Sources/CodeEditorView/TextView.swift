@@ -222,9 +222,6 @@ extension UITextView: TextView {
 
   var documentVisibleRect: CGRect { return CGRect(origin: contentOffset, size: bounds.size) }
 
-  // This implementation currently comes with an infelicity. If there is already a indicator view visible, while this
-  // method is called again, the old view should be removed right away. This is a bit awkward to implement, as we cannot
-  // add a stored property in an extension, but it should happen eventually as it does look better.
   func showFindIndicator(for range: NSRange) {
     guard let textLayoutManager  = optTextLayoutManager,
           let textContentStorage = textLayoutManager.textContentManager as? NSTextContentStorage,
@@ -245,6 +242,11 @@ extension UITextView: TextView {
     label.attributedText      = text
     label.layer.cornerRadius  = 3
     label.layer.masksToBounds = true
+
+    if let codeView = self as? CodeView {
+      codeView.findIndicatorView?.removeFromSuperview()
+      codeView.findIndicatorView = label
+    }
     addSubview(label)
 
     // We animate the label in with a spring effect, and remove it with a delay.
@@ -257,6 +259,9 @@ extension UITextView: TextView {
       UIView.animate(withDuration: 0.2, delay: 0.4){
         label.alpha = 0
       } completion: { _ in
+        if let codeView = self as? CodeView, codeView.findIndicatorView === label {
+          codeView.findIndicatorView = nil
+        }
         label.removeFromSuperview()
       }
     }
