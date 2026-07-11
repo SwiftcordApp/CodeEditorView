@@ -20,11 +20,27 @@ private let logger = Logger(subsystem: "org.justtesting.CodeEditorView", categor
 // MARK: -
 // MARK: UIKit version
 
+import CoreText
 import UIKit
 
 
+#if targetEnvironment(macCatalyst)
+
+// Xcode 27 binds the UIKit feature-key globals to AppKit, where they aren't available when back-deploying to
+// macOS 26.
+private let fontDescriptorFeatureIdentifier = OSFontDescriptor.FeatureKey(
+  rawValue: kCTFontFeatureTypeIdentifierKey as String
+)
+private let fontDescriptorTypeIdentifier = OSFontDescriptor.FeatureKey(
+  rawValue: kCTFontFeatureSelectorIdentifierKey as String
+)
+
+#else
+
 private let fontDescriptorFeatureIdentifier = OSFontDescriptor.FeatureKey.type
 private let fontDescriptorTypeIdentifier    = OSFontDescriptor.FeatureKey.selector
+
+#endif
 
 
 #elseif os(macOS)
